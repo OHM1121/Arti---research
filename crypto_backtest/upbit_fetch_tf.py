@@ -94,7 +94,14 @@ def job(args: tuple[str, str]) -> None:
 
 
 def main() -> None:
-    tfs = sys.argv[1:] or list(ENDPOINTS)
+    global UNIVERSE
+    args = sys.argv[1:]
+    if "--all" in args:                                   # every KRW coin (skips files that already exist)
+        args.remove("--all")
+        m = requests.get("https://api.upbit.com/v1/market/all", timeout=20).json()
+        UNIVERSE = sorted({x["market"][4:] for x in m if x["market"].startswith("KRW-")} - {"USDT", "USDC"})
+        DAYS["1h"] = 1095                                 # 3 years of 60m for the added coins
+    tfs = args or list(ENDPOINTS)
     for tf in tfs:
         (OUT / tf).mkdir(parents=True, exist_ok=True)
     tasks = [(c, tf) for tf in tfs for c in UNIVERSE]

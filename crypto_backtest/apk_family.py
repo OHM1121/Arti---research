@@ -24,24 +24,27 @@ YS = (0.0, 1, 2, 3, 5, 7, 10, 12, 15, 20, 25, 30)       # percent
 TFS = ("5m", "30m", "60m", "day")
 
 
-def table(strategy: str, tf: str, sc) -> pd.DataFrame:
+def table(strategy: str, tf: str, sc, coins: list[str] | None = None, universe=None, topn: int | None = None) -> pd.DataFrame:
     S.SLIP, S.ORDER_MODE = 0.0005, "stop_first"
     S.CFG.update(ma_f={}, trend_f={})
     btc = S.load_bars("BTC", tf)
     btc_c = pd.Series(btc.c, index=btc.t)
     rows = []
-    for coin in W.ALL_COINS:
+    for coin in (coins if coins is not None else W.ALL_COINS):
         b = S.load_bars(coin, tf)
         if b is None:
             continue
         tr = S.ma_trades(coin, tf, b, sc) if strategy == "ma" else S.trend_trades(coin, tf, b, sc)
+        if topn is not None and tr:                       # keep only signals of coins inside the historical TOP-N
+            keep = universe.in_top(coin, pd.DatetimeIndex([b.t[t.sig_i] for t in tr]), tf, topn)
+            tr = [t for t, k in zip(tr, keep) if k]
         if not tr:
             continue
         idx = np.array([t.sig_i for t in tr])
         c = b.c
         bc = btc_c.reindex(b.t).to_numpy()
         ma120 = pd.Series(c).rolling(120, min_periods=120).mean().to_numpy()
-        d = {"coin": coin, "entry_t": [t.entry_t for t in tr], "exit_t": [t.exit_t for t in tr],
+        d = {"coin": coin, "sig_t": list(b.t[idx]), "entry_t": [t.entry_t for t in tr], "exit_t": [t.exit_t for t in tr],
              "ret": [t.ret for t in tr], "size_factor": [t.size_factor for t in tr],
              "d_ma120": c[idx] / ma120[idx] - 1}
         for n in NS:
