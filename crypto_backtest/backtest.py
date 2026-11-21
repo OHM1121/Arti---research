@@ -50,6 +50,7 @@ class Config:
     trail_atr: float = 3.0
     breakout_vol_mult: float = 1.5
     funding_limit_per_8h: float = 0.001
+    entry_mode: str = "both"  # "both" | "breakout" | "pullback"
 
 
 # ---------------------------------------------------------------- data
@@ -215,7 +216,13 @@ def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Conf
                             and C[t, j] > O[t, j] and QV[t, j] > QV[t - 1, j])
                 f = FUND8[t, j]
                 fund_ok = (not cfg.funding_filter) or np.isnan(f) or f <= cfg.funding_limit_per_8h
-                if trend and (breakout or pullback) and fund_ok:
+                if cfg.entry_mode == "breakout":
+                    trigger = breakout
+                elif cfg.entry_mode == "pullback":
+                    trigger = pullback
+                else:
+                    trigger = breakout or pullback
+                if trend and trigger and fund_ok:
                     pending.append(j)
             pending = pending[: max(0, cfg.max_positions - len(pos))]
 
