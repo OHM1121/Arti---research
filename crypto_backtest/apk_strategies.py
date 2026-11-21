@@ -36,9 +36,17 @@ DIRS = {"5m": "5m", "30m": "30m", "60m": "1h", "day": "1d"}
 FREQ = {"5m": "5min", "30m": "30min", "60m": "1h", "day": "1D"}
 SECS = {"5m": 300, "30m": 1800, "60m": 3600, "day": 86400}
 FEE = 0.0005                                         # [CODE] d_upbit.FEE_RATE per side
-SEED, SLOTS = 2_000_000, 4                           # [CODE] coin_b_profile DEFAULT_SEED / DEFAULT_MAX_POSITIONS (per frame wallet)
-SLOT_KRW = SEED // SLOTS                             # per-symbol limit = frame seed // max positions
+# USER (2026-11-21) per-frame wallet: concurrent slots and per-symbol amount when the market is good / bad (score <= -10).
+FRAME_CFG = {
+    "5m": dict(slots=10, good=200_000, bad=100_000),
+    "30m": dict(slots=10, good=200_000, bad=100_000),
+    "60m": dict(slots=5, good=400_000, bad=200_000),
+    "day": dict(slots=4, good=500_000, bad=250_000),
+}
+SEED_PER_FRAME = {tf: c["slots"] * c["good"] for tf, c in FRAME_CFG.items()}      # 2,000,000 KRW each
 MIN_ORDER_KRW = 5000
+SLIP = 0.0005          # per side, applied to every fill (buy at x(1+SLIP), sell at x(1-SLIP)); USER asked for slippage
+ORDER_MODE = "stop_first"   # same-bar ambiguity: downside trigger is always assumed first ("path" = bullish O-L-H-C / bearish O-H-L-C)
 
 
 def hours_to_bars(hours: float, tf: str) -> int:
@@ -62,7 +70,8 @@ REF_MIN_LOW_CLOSE = {"5m": 2.0, "30m": 3.0, "60m": 4.0, "day": None}
 REF_BEAR_SPAN = {"5m": 6, "30m": 6, "60m": 9, "day": 14}
 MA_STOP_BARS = 50
 TREND_STOP_BARS = {"5m": 200, "30m": 200, "60m": 90, "day": 90}
-RSI_ARM, WATCH_H = 30.0, 24
+RSI_ARM = 30.0
+TREND_WATCH_H = {"5m": 24, "30m": 24, "60m": 24, "day": 120}      # USER: daily watch 24h -> 5 days
 ANGLE_LO, ANGLE_HI = -10.0, 20.0                                   # USER (2026-11-21): -10 <= angle <= +20 degrees
 SCORE_BUY_MIN, SCORE_EXIT = 0.0, -10.0
 
@@ -194,8 +203,8 @@ class Trade:
 
     @property
     def ret(self) -> float:
-        cost = self.entry * (1 + FEE)
-        return sum(f * p * (1 - FEE) for _, _, p, f in self.legs) / cost - 1
+        cost = self.entry * (1 + SLIP) * (1 + FEE)
+        return sum(f * p * (1 - SLIP) * (1 - FEE) for _, _, p, f in self.legs) / cost - 1
 
 
 def _sell(tr: Trade, k: int, t, px: float, frac: float, why: str) -> None:
@@ -215,29 +224,46 @@ def _finish_open(tr: Trade, b: Bars) -> None:
 
 
 def manage(tr: Trade, b: Bars, tf: str, kind: str, sc: "ScoreLookup", *, hold_end: int, hard_stop: float,
-           lb_stop: float | None, trail: float) -> int:
+           lb_stop: float | None, trail: float, entry_mode: str = "skip") -> int:
     """Bar-level replay of new_legacy_1118_policy.exit_signal (+ new_legacy_1120 lookback-low close stop).
 
     Order inside exit_signal: hard stop, hold expiry, (reference: score<=-10), lookback-low close stop,
     then by stage: 0 -> [reference: return to entry] TP1 | 1 -> entry+1% stop, TP2 | 2 -> TP1 floor, peak trail.
+    Same-bar ambiguity (a downside trigger and a profit target both inside one bar): ORDER_MODE 'stop_first' always
+    takes the downside first, i.e. the position is stopped out before the target counts.
+    entry_mode: 'skip'      entry at the bar close (MA) -> management starts with the next bar;
+                'down_only' limit fill inside the entry bar (reference) -> only the hard stop can still hit in that bar;
+                'full'      entry at the bar open (Trend) -> the entry bar is managed completely.
     """
     E = tr.entry
     n = len(b.c)
     tp1 = E * (1 + FIRST_GAIN[tf])
     tp2 = tp1 * (1 + SECOND_GAIN[tf])
     stage, seen, peak = 0, False, E
-    for k in range(tr.entry_i + 1, n):
+    first_k = tr.entry_i if entry_mode in ("full", "down_only") else tr.entry_i + 1
+    for k in range(first_k, n):
         o, h, l, c, t = b.o[k], b.h[k], b.l[k], b.c[k], b.t[k]
-        if kind == "reference":
-            s = sc.at(t)
-            if not math.isnan(s) and s <= SCORE_EXIT:
-                _sell(tr, k, t, o, _remaining(tr), "SCORE_MINUS_10")
+        entry_bar = (k == tr.entry_i)
+        if not entry_bar:
+            if kind == "reference":
+                s = sc.at(t)
+                if not math.isnan(s) and s <= SCORE_EXIT:
+                    _sell(tr, k, t, o, _remaining(tr), "SCORE_MINUS_10")
+                    return k
+            if k >= hold_end:
+                _sell(tr, k, t, o, _remaining(tr), "HOLD_EXPIRY")
                 return k
-        if k >= hold_end:
-            _sell(tr, k, t, o, _remaining(tr), "HOLD_EXPIRY")
-            return k
+        if entry_bar and entry_mode == "down_only":
+            if hard_stop > 0 and l <= hard_stop:                 # fell through the limit and on to the stop in the fill bar
+                _sell(tr, k, t, hard_stop if o > hard_stop else o, _remaining(tr), "HARD_STOP")
+                return k
+            continue
         cur = o
-        for phase in (("down", "up") if c >= o else ("up", "down")):
+        if ORDER_MODE == "stop_first":
+            phases = ("down", "up")
+        else:
+            phases = ("down", "up") if c >= o else ("up", "down")
+        for phase in phases:
             if phase == "down":
                 if stage == 0:
                     levels = ([(E, "RETURN_TO_ENTRY")] if (kind == "reference" and seen) else []) + [(hard_stop, "HARD_STOP")]
@@ -342,7 +368,7 @@ def reference_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", use_score: 
         tr = Trade("reference", tf, coin, j, b.t[j], E)
         stop = max(0.0, b.l[i] - (b.h[i] - b.l[i]))       # at_hard_stop: ref low - (ref high - ref low)
         busy = manage(tr, b, tf, "reference", sc, hold_end=j + hours_to_bars(REF_HOLD_H[tf], tf),
-                      hard_stop=stop, lb_stop=None, trail=TRAIL[tf])
+                      hard_stop=stop, lb_stop=None, trail=TRAIL[tf], entry_mode="down_only")
         trades.append(tr)
     return trades
 
@@ -368,7 +394,7 @@ def ma_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup") -> list[Trade]:
         s = sc.at(b.t[i])
         tr = Trade("ma", tf, coin, i, b.t[i], E, size_factor=0.5 if (not math.isnan(s) and s <= SCORE_EXIT) else 1.0)
         busy = manage(tr, b, tf, "ma", sc, hold_end=i + hours_to_bars(MA_HOLD_H[tf], tf), hard_stop=E * (1 - HARD_STOP),
-                      lb_stop=_lookback_stop(b.l, i, MA_STOP_BARS, E), trail=TRAIL[tf])
+                      lb_stop=_lookback_stop(b.l, i, MA_STOP_BARS, E), trail=TRAIL[tf], entry_mode="skip")
         trades.append(tr)
     return trades
 
@@ -409,7 +435,7 @@ def trend_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", angle_lo: float
     n = len(b.c)
     rsi = rsi20(b.c)
     mid, ang = boll_angle(b.c)
-    watch = hours_to_bars(WATCH_H, tf)
+    watch = hours_to_bars(TREND_WATCH_H[tf], tf)
     state, w = "READY", -1
     trades: list[Trade] = []
     busy = -1
@@ -428,7 +454,8 @@ def trend_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", angle_lo: float
                                size_factor=0.5 if (not math.isnan(s) and s <= SCORE_EXIT) else 1.0)
                     busy = manage(tr, b, tf, "trend", sc, hold_end=e + hours_to_bars(TREND_HOLD_H[tf], tf),
                                   hard_stop=E * (1 - HARD_STOP),
-                                  lb_stop=_lookback_stop(b.l, e, TREND_STOP_BARS[tf], E), trail=TREND_TRAIL[tf])
+                                  lb_stop=_lookback_stop(b.l, e, TREND_STOP_BARS[tf], E), trail=TREND_TRAIL[tf],
+                                  entry_mode="full")
                     trades.append(tr)
                     state = "BOUGHT"
                 else:
@@ -442,19 +469,21 @@ def trend_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", angle_lo: float
 
 
 # ----------------------------------------------------------------------------------- portfolio + stats
-def portfolio(trades: list[Trade]) -> dict:
-    """One wallet per frame: seed 2,000,000 KRW, 4 slots, 500,000 KRW per entry (x0.5 for MA/Trend when score <= -10)."""
-    cash = float(SEED)
+def portfolio(trades: list[Trade], tf: str) -> dict:
+    """One wallet per frame (FRAME_CFG): slots, per-symbol amount good/bad market (bad = score <= -10, applies to all)."""
+    cfg = FRAME_CFG[tf]
+    seed = float(SEED_PER_FRAME[tf])
+    cash = seed
     open_pos: list[tuple] = []
     skipped = 0
-    realized = [float(SEED)]
+    realized = [seed]
     for tr in sorted(trades, key=lambda x: x.entry_t):
         for p in sorted([p for p in open_pos if p[0] <= tr.entry_t]):
             cash += p[1] * (1 + p[2])
             open_pos.remove(p)
             realized.append(cash + sum(q[1] for q in open_pos))
-        notional = min(SLOT_KRW * tr.size_factor, cash)
-        if len(open_pos) >= SLOTS or notional < MIN_ORDER_KRW:
+        notional = min(cfg["bad"] if tr.size_factor < 1 else cfg["good"], cash)
+        if len(open_pos) >= cfg["slots"] or notional < MIN_ORDER_KRW:
             skipped += 1
             continue
         cash -= notional
@@ -463,7 +492,7 @@ def portfolio(trades: list[Trade]) -> dict:
         cash += p[1] * (1 + p[2])
         realized.append(cash)
     eq = np.array(realized)
-    return {"portfolio_return": cash / SEED - 1,
+    return {"portfolio_return": cash / seed - 1,
             "portfolio_MDD_realized": float((eq / np.maximum.accumulate(eq) - 1).min()),
             "skipped_no_slot": skipped}
 
@@ -479,5 +508,5 @@ def summarize(trades: list[Trade], strategy: str, tf: str, start, end, ncoins: i
             "avg_win": float(wins.mean()) if len(wins) else np.nan,
             "avg_loss": float(losses.mean()) if len(losses) else np.nan,
             "profit_factor": float(wins.sum() / -losses.sum()) if losses.sum() < 0 else np.nan,
-            "open_at_end": int(sum(t.open_at_end for t in trades)), **portfolio(trades)})
+            "open_at_end": int(sum(t.open_at_end for t in trades)), **portfolio(trades, tf)})
     return row
