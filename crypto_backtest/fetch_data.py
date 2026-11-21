@@ -120,7 +120,44 @@ def fetch_funding(sym: str) -> pd.DataFrame | None:
     return daily.to_frame()
 
 
+def topup_daily() -> None:
+    """Append daily kline files for days after the last complete month (monthly files lag).
+
+    Funding rates are published monthly only, so funding stays NaN for these days
+    (the funding filter then does not block entries).
+    """
+    first = (LAST_MONTH + 1).start_time.normalize()
+    last = pd.Timestamp.now(tz="UTC").tz_localize(None).normalize() - pd.Timedelta(days=1)
+    days = [d.strftime("%Y-%m-%d") for d in pd.date_range(first, last, freq="D")]
+    for sym in UNIVERSE:
+        path = DATA_DIR / "klines" / f"{sym}.csv"
+        if not path.exists():
+            continue
+        url = lambda d: f"{BASE}/spot/daily/klines/{sym}USDT/1d/{sym}USDT-1d-{d}.zip"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            blobs = list(pool.map(lambda d: (d, download(url(d))), days))
+        frames = []
+        for d, blob in blobs:
+            if blob is None:
+                continue
+            df = read_zip_csv(blob, KLINE_COLS)
+            df["date"] = to_daily_date(df["open_time"])
+            frames.append(df[["date", "open", "high", "low", "close", "quote_volume"]])
+        if not frames:
+            print(f"[topup] {sym}: nothing new")
+            continue
+        old = pd.read_csv(path, index_col=0, parse_dates=True)
+        new = pd.concat(frames).drop_duplicates("date").set_index("date").astype(float)
+        out = pd.concat([old, new[~new.index.isin(old.index)]]).sort_index()
+        out.to_csv(path)
+        print(f"[topup] {sym}: +{len(out) - len(old)} rows, now through {out.index.max().date()}")
+
+
 def main() -> None:
+    import sys
+    if "--topup" in sys.argv:
+        topup_daily()
+        return
     (DATA_DIR / "klines").mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "funding").mkdir(parents=True, exist_ok=True)
     for sym in UNIVERSE:
