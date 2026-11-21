@@ -215,6 +215,19 @@ def main() -> None:
         port.append({"strategy": sname, "cost": BASE, **stats(eqs, tr, np.nan)})
     pd.DataFrame(port).to_csv(RESULTS / "upbit_1m_portfolio.csv", index=False)
 
+    # cost sensitivity: total return vs per-side cost (fee 0.05% + slippage), all coins/strategies
+    sens = []
+    for coin in coins:
+        df = load(coin)
+        for sname in ("ema_cross", "donchian", "rsi_revert", "boll_revert"):
+            target = STRATEGIES[sname](df)
+            for cost in (0.0, 0.0005, 0.0008, 0.0010, 0.0012, 0.0015, 0.0020, 0.0030):
+                eq, _ = simulate(df, target, cost)
+                sens.append({"coin": coin, "strategy": sname, "cost_per_side": cost,
+                             "total_return": eq.iloc[-1] - 1})
+    sens = pd.DataFrame(sens)
+    sens.to_csv(RESULTS / "upbit_1m_cost_sensitivity.csv", index=False)
+
     pd.set_option("display.width", 220)
     pd.set_option("display.float_format", lambda x: f"{x:,.4f}")
     base_full = res[(res["cost"] == BASE) & (res["period"] == "full")]
@@ -223,6 +236,11 @@ def main() -> None:
                      "win_rate", "avg_trade", "profit_factor", "avg_hold_min", "exposure"]].to_string(index=False))
     print("\n=== Equal-weight portfolio of coins (base cost) ===")
     print(pd.DataFrame(port).drop(columns=["cost"]).to_string(index=False))
+    print("\n=== Total return vs per-side cost: median across coins / DOGE ===")
+    print(sens[sens.coin != "DOGE"].pivot_table(index="strategy", columns="cost_per_side",
+                                                 values="total_return", aggfunc="median").to_string())
+    print(sens[sens.coin == "DOGE"].pivot_table(index="strategy", columns="cost_per_side",
+                                                 values="total_return").to_string())
     print("\n=== Mean total return across coins by strategy / cost (full period) ===")
     print(res[res["period"] == "full"].pivot_table(index="strategy", columns="cost",
                                                    values="total_return", aggfunc="mean").to_string())
