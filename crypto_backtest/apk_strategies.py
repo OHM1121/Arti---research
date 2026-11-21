@@ -76,6 +76,22 @@ ANGLE_LO, ANGLE_HI = -10.0, 20.0                                   # USER (2026-
 SCORE_BUY_MIN, SCORE_EXIT = 0.0, -10.0
 
 
+# ----------------------------------------------------------------------------------- tunable settings (improvement study)
+# Defaults == the APK 0.2.1 base rules. apk_improve.py overrides them per experiment; apk_run.py never touches them.
+CFG = dict(
+    tp_scale=1.0,                 # multiplies TP1 / TP2 gains
+    trail_scale=1.0,              # multiplies the post-TP2 trailing percentages
+    after_first=AFTER_FIRST_STOP, # sell-all level after TP1 (entry * (1+x))
+    hard_stop=HARD_STOP,          # MA / Trend hard stop
+    hold_scale=1.0,               # multiplies the holding expiry
+    first_share=FIRST_SHARE, second_share=SECOND_SHARE,
+    ma_stop_bars=MA_STOP_BARS,    # None disables the lookback-low close stop
+    trend_stop_scale=1.0, trend_stop_off=False,
+    ma_f={}, trend_f={},          # entry filters (see _mask)
+    trend_rsi=RSI_ARM, trend_watch_scale=1.0,
+)
+
+
 # ----------------------------------------------------------------------------------- data
 @dataclass
 class Bars:
@@ -237,8 +253,8 @@ def manage(tr: Trade, b: Bars, tf: str, kind: str, sc: "ScoreLookup", *, hold_en
     """
     E = tr.entry
     n = len(b.c)
-    tp1 = E * (1 + FIRST_GAIN[tf])
-    tp2 = tp1 * (1 + SECOND_GAIN[tf])
+    tp1 = E * (1 + FIRST_GAIN[tf] * CFG["tp_scale"])
+    tp2 = tp1 * (1 + SECOND_GAIN[tf] * CFG["tp_scale"])
     stage, seen, peak = 0, False, E
     first_k = tr.entry_i if entry_mode in ("full", "down_only") else tr.entry_i + 1
     for k in range(first_k, n):
@@ -268,7 +284,7 @@ def manage(tr: Trade, b: Bars, tf: str, kind: str, sc: "ScoreLookup", *, hold_en
                 if stage == 0:
                     levels = ([(E, "RETURN_TO_ENTRY")] if (kind == "reference" and seen) else []) + [(hard_stop, "HARD_STOP")]
                 elif stage == 1:
-                    levels = [(E * (1 + AFTER_FIRST_STOP), "AFTER_FIRST_PLUS_1"), (hard_stop, "HARD_STOP")]
+                    levels = [(E * (1 + CFG["after_first"]), "AFTER_FIRST_PLUS_1"), (hard_stop, "HARD_STOP")]
                 else:
                     levels = [(max(tp1, peak * (1 - trail)), "TP1_FLOOR_OR_TRAIL"), (hard_stop, "HARD_STOP")]
                 for level, why in levels:
@@ -281,10 +297,10 @@ def manage(tr: Trade, b: Bars, tf: str, kind: str, sc: "ScoreLookup", *, hold_en
                     if kind == "reference" and h > E:
                         seen = True
                     if h >= tp1:
-                        _sell(tr, k, t, max(tp1, cur), FIRST_SHARE, "TP1")
+                        _sell(tr, k, t, max(tp1, cur), CFG["first_share"], "TP1")
                         stage = 1
                 if stage == 1 and h >= tp2:
-                    _sell(tr, k, t, max(tp2, cur), SECOND_SHARE, "TP2")
+                    _sell(tr, k, t, max(tp2, cur), CFG["second_share"], "TP2")
                     stage, peak = 2, tp2
                 if stage == 2:
                     peak = max(peak, h)
@@ -373,6 +389,40 @@ def reference_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", use_score: 
     return trades
 
 
+# ----------------------------------------------------------------------------------- entry filters (improvement study)
+def _score_array(b: Bars, sc: "ScoreLookup") -> np.ndarray:
+    t = b.t.to_numpy("datetime64[ns]").astype("int64")
+    idx = np.searchsorted(sc.ends, t, side="right") - 1
+    return np.where(idx >= 0, sc.score[np.clip(idx, 0, None)], np.nan)
+
+
+def _mask(b: Bars, sc: "ScoreLookup", f: dict, ma: dict | None = None, mid: np.ndarray | None = None) -> np.ndarray:
+    """Boolean mask of bars that pass the optional entry filters (empty dict = no filter)."""
+    n = len(b.c)
+    m = np.ones(n, bool)
+    if not f:
+        return m
+    with np.errstate(invalid="ignore", divide="ignore"):
+        if f.get("score_min") is not None:
+            m &= _score_array(b, sc) > f["score_min"]
+        if f.get("bull"):
+            m &= b.c > b.o
+        if f.get("volx") is not None:
+            avg = pd.Series(b.v).rolling(20, min_periods=20).mean().shift(1).to_numpy()
+            m &= b.v >= f["volx"] * avg
+        if f.get("c_gt_ma5") and ma is not None:
+            m &= b.c > ma[5]
+        if f.get("rsi14_max") is not None:
+            m &= rsi20(b.c, 14) <= f["rsi14_max"]
+        if f.get("dist120_min") is not None and ma is not None:
+            m &= (ma[120] - b.c) / ma[120] >= f["dist120_min"]
+        if f.get("dist_mid_max") is not None and mid is not None:
+            m &= (b.c - mid) / mid <= f["dist_mid_max"]
+        if f.get("rsi_min") is not None:
+            m &= rsi20(b.c, 20) >= f["rsi_min"]
+    return m
+
+
 # ----------------------------------------------------------------------------------- MA
 def ma_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup") -> list[Trade]:
     """REVERSAL_UP (ma_v067_policy.prewatch_upward_alignment, 0.2.1): MA120 slope strictly negative, MA5/10/20/60 all
@@ -385,6 +435,7 @@ def ma_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup") -> list[Trade]:
         qual = (d[120] < 0) & np.all([(d[p] > 0) & (ma[p] < ma[120]) for p in (5, 10, 20, 60)], axis=0)
     sig = qual & ~np.r_[False, qual[:-1]]
     sig[:125] = False
+    sig &= _mask(b, sc, CFG["ma_f"], ma=ma)
     trades: list[Trade] = []
     busy = -1
     for i in np.flatnonzero(sig):
@@ -393,8 +444,10 @@ def ma_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup") -> list[Trade]:
         E = b.c[i]                                          # bought in the last seconds of the signal bar
         s = sc.at(b.t[i])
         tr = Trade("ma", tf, coin, i, b.t[i], E, size_factor=0.5 if (not math.isnan(s) and s <= SCORE_EXIT) else 1.0)
-        busy = manage(tr, b, tf, "ma", sc, hold_end=i + hours_to_bars(MA_HOLD_H[tf], tf), hard_stop=E * (1 - HARD_STOP),
-                      lb_stop=_lookback_stop(b.l, i, MA_STOP_BARS, E), trail=TRAIL[tf], entry_mode="skip")
+        busy = manage(tr, b, tf, "ma", sc, hold_end=i + hours_to_bars(MA_HOLD_H[tf] * CFG["hold_scale"], tf),
+                      hard_stop=E * (1 - CFG["hard_stop"]),
+                      lb_stop=(_lookback_stop(b.l, i, CFG["ma_stop_bars"], E) if CFG["ma_stop_bars"] else None),
+                      trail=TRAIL[tf] * CFG["trail_scale"], entry_mode="skip")
         trades.append(tr)
     return trades
 
@@ -435,7 +488,9 @@ def trend_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", angle_lo: float
     n = len(b.c)
     rsi = rsi20(b.c)
     mid, ang = boll_angle(b.c)
-    watch = hours_to_bars(TREND_WATCH_H[tf], tf)
+    watch = hours_to_bars(TREND_WATCH_H[tf] * CFG["trend_watch_scale"], tf)
+    fmask = _mask(b, sc, CFG["trend_f"], mid=mid)
+    rsi_arm = CFG["trend_rsi"]
     state, w = "READY", -1
     trades: list[Trade] = []
     busy = -1
@@ -446,24 +501,25 @@ def trend_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", angle_lo: float
                 state = "EXPIRED"
             elif j > w and b.c[j] > mid[j]:
                 ok = (angle_lo < ang[j] < angle_hi) if strict else (angle_lo <= ang[j] <= angle_hi)
-                if ok and j + 1 > busy:
+                if ok and fmask[j] and j + 1 > busy:
                     e = j + 1
                     E = b.o[e]
                     s = sc.at(b.t[e])
                     tr = Trade("trend", tf, coin, e, b.t[e], E,
                                size_factor=0.5 if (not math.isnan(s) and s <= SCORE_EXIT) else 1.0)
-                    busy = manage(tr, b, tf, "trend", sc, hold_end=e + hours_to_bars(TREND_HOLD_H[tf], tf),
-                                  hard_stop=E * (1 - HARD_STOP),
-                                  lb_stop=_lookback_stop(b.l, e, TREND_STOP_BARS[tf], E), trail=TREND_TRAIL[tf],
-                                  entry_mode="full")
+                    busy = manage(tr, b, tf, "trend", sc, hold_end=e + hours_to_bars(TREND_HOLD_H[tf] * CFG["hold_scale"], tf),
+                                  hard_stop=E * (1 - CFG["hard_stop"]),
+                                  lb_stop=(None if CFG["trend_stop_off"] else
+                                           _lookback_stop(b.l, e, max(20, int(TREND_STOP_BARS[tf] * CFG["trend_stop_scale"])), E)),
+                                  trail=TREND_TRAIL[tf] * CFG["trail_scale"], entry_mode="full")
                     trades.append(tr)
                     state = "BOUGHT"
                 else:
                     state = "CONSUMED"
         if not math.isnan(r):
-            if r > RSI_ARM and state in ("EXPIRED", "BOUGHT", "CONSUMED"):
+            if r > rsi_arm and state in ("EXPIRED", "BOUGHT", "CONSUMED"):
                 state = "READY"
-            if state == "READY" and r <= RSI_ARM:
+            if state == "READY" and r <= rsi_arm:
                 state, w = "WATCHING", j
     return trades
 
