@@ -25,7 +25,7 @@ ENDPOINTS = {
     "1h": "https://api.upbit.com/v1/candles/minutes/60",
     "1d": "https://api.upbit.com/v1/candles/days",
 }
-DAYS = {"1d": 1460, "1h": 1460, "30m": 730, "5m": 90, "1m": 30}
+DAYS = {"1d": 1460, "1h": 1460, "30m": 1460, "5m": 365, "1m": 30}
 MIN_INTERVAL = 0.11  # global ~9 req/s, under Upbit's 10 req/s candle limit
 _lock = threading.Lock()
 _last = [0.0]
