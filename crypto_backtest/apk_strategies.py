@@ -209,6 +209,7 @@ class Trade:
     entry_t: pd.Timestamp
     entry: float
     size_factor: float = 1.0
+    sig_i: int = -1                              # signal bar index (for feature lookup)
     legs: list = field(default_factory=list)     # (bar_index, time, price, fraction of original)
     reasons: list = field(default_factory=list)
     open_at_end: bool = False
@@ -444,6 +445,7 @@ def ma_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup") -> list[Trade]:
         E = b.c[i]                                          # bought in the last seconds of the signal bar
         s = sc.at(b.t[i])
         tr = Trade("ma", tf, coin, i, b.t[i], E, size_factor=0.5 if (not math.isnan(s) and s <= SCORE_EXIT) else 1.0)
+        tr.sig_i = i
         busy = manage(tr, b, tf, "ma", sc, hold_end=i + hours_to_bars(MA_HOLD_H[tf] * CFG["hold_scale"], tf),
                       hard_stop=E * (1 - CFG["hard_stop"]),
                       lb_stop=(_lookback_stop(b.l, i, CFG["ma_stop_bars"], E) if CFG["ma_stop_bars"] else None),
@@ -507,6 +509,7 @@ def trend_trades(coin: str, tf: str, b: Bars, sc: "ScoreLookup", angle_lo: float
                     s = sc.at(b.t[e])
                     tr = Trade("trend", tf, coin, e, b.t[e], E,
                                size_factor=0.5 if (not math.isnan(s) and s <= SCORE_EXIT) else 1.0)
+                    tr.sig_i = j
                     busy = manage(tr, b, tf, "trend", sc, hold_end=e + hours_to_bars(TREND_HOLD_H[tf] * CFG["hold_scale"], tf),
                                   hard_stop=E * (1 - CFG["hard_stop"]),
                                   lb_stop=(None if CFG["trend_stop_off"] else

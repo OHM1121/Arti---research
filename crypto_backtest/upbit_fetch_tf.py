@@ -17,7 +17,10 @@ import requests
 
 OUT = Path(__file__).resolve().parent / "data" / "upbit_tf"
 UNIVERSE = ["BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "LINK", "DOT", "TRX", "XLM", "ATOM",
-            "ETC", "BCH", "NEAR", "AAVE", "UNI", "SUI", "APT", "ARB", "OP", "HBAR", "POL"]
+            "ETC", "BCH", "NEAR", "AAVE", "UNI", "SUI", "APT", "ARB", "OP", "HBAR", "POL",
+            # extension (2026-11-21): more coins -> more out-of-sample trades
+            "SC", "SHIB", "STX", "FIL", "SAND", "ALGO", "AXS", "WAVES", "KAVA", "VET", "ELF", "EGLD", "LSK", "ARK",
+            "GAS", "CHZ", "BAT", "NEO", "IOTA", "IMX", "GRT", "ANKR"]
 ENDPOINTS = {
     "1m": "https://api.upbit.com/v1/candles/minutes/1",
     "5m": "https://api.upbit.com/v1/candles/minutes/5",
@@ -25,8 +28,8 @@ ENDPOINTS = {
     "1h": "https://api.upbit.com/v1/candles/minutes/60",
     "1d": "https://api.upbit.com/v1/candles/days",
 }
-DAYS = {"1d": 1460, "1h": 1460, "30m": 1460, "5m": 365, "1m": 30}
-MIN_INTERVAL = 0.11  # global ~9 req/s, under Upbit's 10 req/s candle limit
+DAYS = {"1d": 3300, "1h": 2190, "30m": 1460, "5m": 365, "1m": 30}
+MIN_INTERVAL = 0.105  # global ~9.5 req/s, under Upbit's 10 req/s candle limit
 _lock = threading.Lock()
 _last = [0.0]
 
@@ -95,7 +98,7 @@ def main() -> None:
     for tf in tfs:
         (OUT / tf).mkdir(parents=True, exist_ok=True)
     tasks = [(c, tf) for tf in tfs for c in UNIVERSE]
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=10) as ex:
         list(ex.map(job, tasks))
     print("ALL DONE", flush=True)
 

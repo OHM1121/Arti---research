@@ -1,0 +1,5 @@
+strategy,tf,fold,r1,r2,top_corr
+trend,5m,2026-03-01,"('btc_ret20', -1, -0.008742185309529305)","('dd60', -1, -0.0201336495578289)","volx20,slope_ma60,ret60,lwick,volz60,bbw20"
+trend,5m,2026-05-01,"('btc_ret20', -1, -0.007136431988328695)","('btc_atr14', 1, 0.003187887044623494)","btc_ret20,rel20,score,h_atr,volz60,score_chg"
+trend,5m,2026-07-01,"('btc_ret20', -1, -0.003867639787495136)","('ret20', -1, -0.002857806021347642)","consec_dn,btc_ret20,score,h_atr,rel20,score_chg"
+trend,5m,2026-09-01,"('btc_ret20', -1, -0.005731999222189188)","('btc_atr14', 1, 0.002335352124646306)","consec_dn,btc_ret20,h_atr,score,rsi5,stoch14"
