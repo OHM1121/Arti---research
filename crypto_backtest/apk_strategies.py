@@ -69,10 +69,11 @@ MA = dict(
     guard_after_first=0.01, trail=0.03,                                   # [CODE] v067 up_exit
 )
 TREND = dict(
-    frames=("30m", "60m", "day"),
+    frames=("5m", "30m", "60m", "day"),
     rsi_arm=30.0, watch_h=24, bb_k=1.5, slope_lo=-20.0, slope_hi=30.0,    # [POLICY] RSI20<=30, 24h, BB20/1.5, (-20,+30)
     hard_stop=0.15,                                                       # [POLICY]
-    hold_h={"30m": 72, "60m": 120, "day": 240},                           # [ASSUMED] market_trend_v043.HOLD_HOURS
+    hold_h={"5m": 48, "30m": 72, "60m": 120, "day": 240},                 # [ASSUMED] market_trend_v043.HOLD_HOURS
+    # NOTE: the APK retired 5m for NEW trend entries (policy 11.18); the 5m case is run only because it was requested.
     width_cap=0.03, f1=0.30, f2=0.35, trail=0.04,                         # [CODE] candle_targets / TrendPosition
 )
 

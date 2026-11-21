@@ -23,8 +23,8 @@ def main() -> None:
                                                                 header=["score"])
     rows, all_trades = [], []
     nosc = S.ScoreLookup(np.array([0], dtype="int64"), np.array([100.0]))   # score gate disabled
-    plan = [("reference", S.FRAMES), ("ma", S.FRAMES), ("trend", S.TREND["frames"]),
-            ("reference_no_score_gate", S.FRAMES), ("trend_no_slope_filter", S.TREND["frames"]),
+    plan = [("reference", S.FRAMES), ("ma", S.FRAMES), ("trend", S.FRAMES),            # the 12 requested cases
+            ("reference_no_score_gate", S.FRAMES), ("trend_no_slope_filter", S.FRAMES),   # sensitivity only
             ("ma_v067_variant", S.FRAMES)]
     for strategy, frames in plan:
         for tf in frames:
