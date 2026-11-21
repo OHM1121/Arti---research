@@ -1,26 +1,42 @@
-"""Upbit KRW candle downloader for 30m / 1h / 1d (long history).
+"""Upbit KRW candle downloader for a coin universe (1m / 5m / 30m / 1h / 1d), parallel with a global rate limit.
 
-Usage: python3 upbit_fetch_tf.py [days] [COIN ...]
-Saves data/upbit_tf/<tf>/<COIN>.csv.gz  (index = UTC bar start).
+Usage: python3 upbit_fetch_tf.py            # default universe and per-timeframe history
+Saves data/upbit_tf/<tf>/<COIN>.csv.gz  (index = UTC bar start). Existing files are skipped.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
 import requests
 
 OUT = Path(__file__).resolve().parent / "data" / "upbit_tf"
-DEFAULT_COINS = ["BTC", "ETH", "XRP", "SOL", "DOGE"]
+UNIVERSE = ["BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "LINK", "DOT", "TRX", "XLM", "ATOM",
+            "ETC", "BCH", "NEAR", "AAVE", "UNI", "SUI", "APT", "ARB", "OP", "HBAR", "POL"]
 ENDPOINTS = {
+    "1m": "https://api.upbit.com/v1/candles/minutes/1",
+    "5m": "https://api.upbit.com/v1/candles/minutes/5",
     "30m": "https://api.upbit.com/v1/candles/minutes/30",
     "1h": "https://api.upbit.com/v1/candles/minutes/60",
     "1d": "https://api.upbit.com/v1/candles/days",
 }
-MIN_INTERVAL = 0.125
+DAYS = {"1d": 1460, "1h": 1460, "30m": 730, "5m": 90, "1m": 30}
+MIN_INTERVAL = 0.11  # global ~9 req/s, under Upbit's 10 req/s candle limit
+_lock = threading.Lock()
+_last = [0.0]
+
+
+def _throttle() -> None:
+    with _lock:
+        wait = MIN_INTERVAL - (time.time() - _last[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last[0] = time.time()
 
 
 def fetch(coin: str, tf: str, days: int) -> pd.DataFrame:
@@ -29,16 +45,12 @@ def fetch(coin: str, tf: str, days: int) -> pd.DataFrame:
     to = end + pd.Timedelta(days=1)
     rows: list[dict] = []
     sess = requests.Session()
-    last = 0.0
     while to > start:
-        wait = MIN_INTERVAL - (time.time() - last)
-        if wait > 0:
-            time.sleep(wait)
-        last = time.time()
+        _throttle()
         r = sess.get(ENDPOINTS[tf], params={"market": f"KRW-{coin}", "count": 200,
-                                            "to": to.strftime("%Y-%m-%dT%H:%M:%S")}, timeout=20)
+                                            "to": to.strftime("%Y-%m-%dT%H:%M:%S")}, timeout=30)
         if r.status_code == 429:
-            time.sleep(1.5)
+            time.sleep(2)
             continue
         r.raise_for_status()
         batch = r.json()
@@ -47,6 +59,8 @@ def fetch(coin: str, tf: str, days: int) -> pd.DataFrame:
         rows.extend(batch)
         to = pd.Timestamp(batch[-1]["candle_date_time_utc"])
     df = pd.DataFrame(rows)
+    if df.empty:
+        return df
     df.index = pd.to_datetime(df["candle_date_time_utc"])
     df = df.rename(columns={"opening_price": "open", "high_price": "high", "low_price": "low",
                             "trade_price": "close", "candle_acc_trade_volume": "volume",
@@ -56,17 +70,34 @@ def fetch(coin: str, tf: str, days: int) -> pd.DataFrame:
     return df[df.index >= start]
 
 
+def job(args: tuple[str, str]) -> None:
+    coin, tf = args
+    path = OUT / tf / f"{coin}.csv.gz"
+    if path.exists():
+        return
+    for attempt in range(3):
+        try:
+            df = fetch(coin, tf, DAYS[tf])
+            break
+        except requests.RequestException as e:
+            print(f"{coin} {tf}: retry {attempt} ({e})", flush=True)
+            time.sleep(3)
+    else:
+        print(f"{coin} {tf}: FAILED", flush=True)
+        return
+    df.index.name = "t"
+    df.to_csv(path)
+    print(f"{coin} {tf}: saved {len(df)} bars {df.index[0] if len(df) else ''}", flush=True)
+
+
 def main() -> None:
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else 1460
-    coins = sys.argv[2:] or DEFAULT_COINS
-    for tf in ENDPOINTS:
+    tfs = sys.argv[1:] or list(ENDPOINTS)
+    for tf in tfs:
         (OUT / tf).mkdir(parents=True, exist_ok=True)
-    for coin in coins:
-        for tf in ENDPOINTS:
-            df = fetch(coin, tf, days)
-            df.index.name = "t"
-            df.to_csv(OUT / tf / f"{coin}.csv.gz")
-            print(f"{coin} {tf}: saved {len(df)} bars {df.index[0]} -> {df.index[-1]}", flush=True)
+    tasks = [(c, tf) for tf in tfs for c in UNIVERSE]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        list(ex.map(job, tasks))
+    print("ALL DONE", flush=True)
 
 
 if __name__ == "__main__":

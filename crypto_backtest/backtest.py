@@ -113,7 +113,10 @@ def add_indicators(p: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
 
 # ---------------------------------------------------------------- simulation
 
-def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Config):
+def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Config,
+             refresh: np.ndarray | None = None, warmup: int = WARMUP):
+    """refresh: bool array marking the bars on which the weekly score/candidate refresh runs
+    (default: Sundays, i.e. the original daily behaviour)."""
     close = p["close"]
     syms = list(close.columns)
     idx = close.index
@@ -128,6 +131,7 @@ def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Conf
     FUND8, SCORE, MOM = arr(ind["fund8"]), arr(ind["score"]), arr(ind["mom"])
     market_ok = (close["BTC"] > ind["ma200_btc"]).to_numpy() if cfg.market_filter else np.ones(T, bool)
     dow = idx.dayofweek.to_numpy()
+    refresh = (dow == 6) if refresh is None else np.asarray(refresh, dtype=bool)
 
     cash = cfg.capital
     pos: dict[int, dict] = {}
@@ -146,10 +150,10 @@ def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Conf
             "symbol": syms[j], "entry_date": pp["entry_date"], "exit_date": idx[t],
             "entry_px": pp["entry"], "exit_px": sell_px, "reason": reason,
             "pnl": proceeds - pp["cost"], "ret": proceeds / pp["cost"] - 1,
-            "hold_days": (idx[t] - pp["entry_date"]).days,
+            "hold_days": (idx[t] - pp["entry_date"]).days, "hold_bars": t - pp["t0"],
         })
 
-    for t in range(WARMUP, T):
+    for t in range(warmup, T):
         # 1) fill pending buys at today's open -------------------------------
         if pending:
             prev_eq = equity[-1] if equity else cfg.capital
@@ -176,7 +180,7 @@ def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Conf
                 pos[j] = {
                     "qty": qty, "entry": buy_px, "entry_date": idx[t], "cost": cost,
                     "stop0": buy_px - stop_dist, "hh": H[t, j],
-                    "atr_prev": ATR[t, j], "below": 0, "last": O[t, j],
+                    "atr_prev": ATR[t, j], "below": 0, "last": O[t, j], "t0": t,
                 }
             pending = []
 
@@ -202,7 +206,7 @@ def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Conf
             if pp["below"] >= 2:
                 close_pos(j, C[t, j], t, "ma20_2d")
                 continue
-            if dow[t] == 6 and SCORE[t, j] < cfg.exit_score:
+            if refresh[t] and SCORE[t, j] < cfg.exit_score:
                 close_pos(j, C[t, j], t, "score_drop")
 
         # 3) entry triggers at today's close -> fill next open --------------
@@ -236,15 +240,15 @@ def simulate(p: dict[str, pd.DataFrame], ind: dict[str, pd.DataFrame], cfg: Conf
         invested_frac.append(invested / equity[-1] if equity[-1] > 0 else 0.0)
 
         # 5) weekly candidate refresh (Sunday close) -------------------------
-        if dow[t] == 6:
+        if refresh[t]:
             scores = SCORE[t]
             moms = MOM[t]
             ok = [j for j in range(N) if scores[j] >= cfg.min_score and not np.isnan(moms[j])]
             ok.sort(key=lambda j: (-scores[j], -moms[j]))
             candidates = ok[: cfg.top_n_candidates]
 
-    eq = pd.Series(equity, index=idx[WARMUP:], name="equity")
-    inv = pd.Series(invested_frac, index=idx[WARMUP:], name="invested_frac")
+    eq = pd.Series(equity, index=idx[warmup:], name="equity")
+    inv = pd.Series(invested_frac, index=idx[warmup:], name="invested_frac")
     tr = pd.DataFrame(trades)
     open_pos = [syms[j] for j in pos]
     return eq, inv, tr, open_pos
